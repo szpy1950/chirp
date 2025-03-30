@@ -1,5 +1,8 @@
 import streamlit as st
 import redis
+import time
+from datetime import datetime
+import uuid
 
 r = redis.Redis(host='localhost', port=6379, decode_responses=True)
 st.title("Chirp - Simple Twitter Clone")
@@ -22,7 +25,19 @@ with tab1:
             user = r.hgetall(f"user:{user_id}")
 
             st.write(f"**@{user.get('screen_name', 'unknown')}**: {chirp.get('text', '')}")
-            st.write(f"Posted: {chirp.get('created_at', '')}")
+
+            # Convert the Twitter-style timestamp 
+            created_at = chirp.get('created_at', '')
+            if created_at:
+                try:
+                    dt = datetime.strptime(created_at, "%a %b %d %H:%M:%S +0000 %Y")
+                    friendly_date = dt.strftime("%b %d, %Y at %I:%M %p")
+                    st.write(f"Posted: {friendly_date}")
+                except:
+                    st.write(f"Posted: {created_at}")
+            else:
+                st.write("Posted: Unknown time")
+
             st.write("---")
 
 # top Users
@@ -58,5 +73,61 @@ with tab3:
         if not username or not text:
             st.error("Please enter both username and text!")
         else:
-            st.success(f"Chirp posted as @{username}! (not really saved)")
-            st.info("Note: This is just a simulation, chirps aren't actually saved.")
+            # Check if user exists, if not create a new one
+            user_id = r.get(f"screen_name:{username}")
+
+            if not user_id:
+                # Create a new user with a unique ID
+                user_id = str(uuid.uuid4())
+                user_key = f"user:{user_id}"
+
+                # Store user in Redis
+                r.hset(user_key, mapping={
+                    'id': user_id,
+                    'screen_name': username,
+                    'name': username,
+                    'followers_count': 0,
+                    'chirps_count': 0,
+                    'created_at': datetime.now().strftime("%a %b %d %H:%M:%S +0000 %Y")
+                })
+
+                # Add to set of all users
+                r.sadd('users', user_id)
+
+                # Add to sorted set by followers
+                r.zadd('top_users_by_followers', {user_id: 0})
+
+                # Create mapping for screen_name to user_id
+                r.set(f"screen_name:{username}", user_id)
+
+            # Create a new chirp
+            chirp_id = str(uuid.uuid4())
+            created_at = datetime.now().strftime("%a %b %d %H:%M:%S +0000 %Y")
+            timestamp = int(time.time())
+
+            # Store chirp in Redis
+            chirp_key = f"chirp:{chirp_id}"
+            r.hset(chirp_key, mapping={
+                'id': chirp_id,
+                'user_id': user_id,
+                'text': text,
+                'created_at': created_at,
+                'timestamp': timestamp
+            })
+
+            # Adding the chirp to collections
+            r.sadd('chirps', chirp_id)
+            r.sadd(f"user:{user_id}:chirps", chirp_id)
+            r.zadd('chirps_by_time', {chirp_id: timestamp})
+            r.lpush('latest_chirps', chirp_id)
+            r.ltrim('latest_chirps', 0, 4)  # Keep only latest 5
+
+            # Increment user's chirp count
+            r.hincrby(f"user:{user_id}", 'chirps_count', 1)
+
+            # Update sorted set for users by chirp count
+            current_count = int(r.hget(f"user:{user_id}", 'chirps_count'))
+            r.zadd('top_users_by_chirps', {user_id: current_count})
+
+            st.success(f"Chirp posted as @{username}!")
+            st.rerun()  # Refresh the app to show the new chirp
